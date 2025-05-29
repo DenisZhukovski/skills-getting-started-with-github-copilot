@@ -10,6 +10,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 import os
 from pathlib import Path
+from pymongo import MongoClient
+from fastapi.encoders import jsonable_encoder
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -19,8 +21,14 @@ current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
 
-# In-memory activity database
-activities = {
+# MongoDB setup
+MONGO_URL = "mongodb://localhost:27017"
+client = MongoClient(MONGO_URL)
+db = client["mergington_high"]
+activities_collection = db["activities"]
+
+# Pre-populate activities if collection is empty
+PREPOPULATED_ACTIVITIES = {
     "Chess Club": {
         "description": "Learn strategies and compete in chess tournaments",
         "schedule": "Fridays, 3:30 PM - 5:00 PM",
@@ -39,7 +47,6 @@ activities = {
         "max_participants": 30,
         "participants": ["john@mergington.edu", "olivia@mergington.edu"]
     },
-    # Sports related activities
     "Soccer Team": {
         "description": "Join the school soccer team and compete in local leagues",
         "schedule": "Tuesdays and Thursdays, 4:00 PM - 5:30 PM",
@@ -52,7 +59,6 @@ activities = {
         "max_participants": 15,
         "participants": ["liam@mergington.edu", "ava@mergington.edu"]
     },
-    # Artistic activities
     "Drama Club": {
         "description": "Participate in school plays and improve acting skills",
         "schedule": "Mondays, 4:00 PM - 5:30 PM",
@@ -65,7 +71,6 @@ activities = {
         "max_participants": 20,
         "participants": ["amelia@mergington.edu", "benjamin@mergington.edu"]
     },
-    # Intellectual activities
     "Math Olympiad": {
         "description": "Prepare for math competitions and solve challenging problems",
         "schedule": "Thursdays, 3:30 PM - 5:00 PM",
@@ -80,6 +85,12 @@ activities = {
     }
 }
 
+if activities_collection.count_documents({}) == 0:
+    for name, details in PREPOPULATED_ACTIVITIES.items():
+        doc = details.copy()
+        doc["_id"] = name
+        activities_collection.insert_one(jsonable_encoder(doc))
+
 
 @app.get("/")
 def root():
@@ -88,34 +99,34 @@ def root():
 
 @app.get("/activities")
 def get_activities():
+    activities = {}
+    for doc in activities_collection.find():
+        name = doc["_id"]
+        details = doc.copy()
+        details.pop("_id")
+        activities[name] = details
     return activities
 
 
 @app.post("/activities/{activity_name}/signup")
 def signup_for_activity(activity_name: str, email: str):
-    """Sign up a student for an activity"""
-    # Validate activity exists
-    if activity_name not in activities:
+    doc = activities_collection.find_one({"_id": activity_name})
+    if not doc:
         raise HTTPException(status_code=404, detail="Activity not found")
-
-    # Get the specificy activity
-    activity = activities[activity_name]
-
-    # Add student
-    # Validate student is not already signed up
-    if email in activity["participants"]:
+    if email in doc["participants"]:
         raise HTTPException(status_code=400, detail="Already signed up for this activity")
-    activity["participants"].append(email)
+    doc["participants"].append(email)
+    activities_collection.update_one({"_id": activity_name}, {"$set": {"participants": doc["participants"]}})
     return {"message": f"Signed up {email} for {activity_name}"}
 
 
 @app.delete("/activities/{activity_name}/remove")
 def remove_participant(activity_name: str, email: str):
-    """Remove a participant from an activity"""
-    if activity_name not in activities:
+    doc = activities_collection.find_one({"_id": activity_name})
+    if not doc:
         raise HTTPException(status_code=404, detail="Activity not found")
-    activity = activities[activity_name]
-    if email not in activity["participants"]:
+    if email not in doc["participants"]:
         raise HTTPException(status_code=404, detail="Participant not found in this activity")
-    activity["participants"].remove(email)
+    doc["participants"].remove(email)
+    activities_collection.update_one({"_id": activity_name}, {"$set": {"participants": doc["participants"]}})
     return {"message": f"Removed {email} from {activity_name}"}
